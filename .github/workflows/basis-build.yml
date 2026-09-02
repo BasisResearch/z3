@@ -26,11 +26,12 @@ concurrency:
 jobs:
   build:
     strategy:
+      fail-fast: false
       matrix:
         build: [macos, linux]
         include:
           - build: macos
-            os: macos-14
+            os: macos-latest
             release_name: z3-arm64-macos
           - build: linux
             os: ubuntu-24.04
@@ -38,6 +39,8 @@ jobs:
 
     runs-on: ${{ matrix.os }}
     timeout-minutes: 120
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "13.3"
 
     steps:
       - uses: actions/checkout@v6
