@@ -1,0 +1,111 @@
+# SPDX-License-Identifier: MIT
+#
+# Basis fork build: produce pinned z3 binaries for the platforms the Verus
+# MCP server supports (arm64 macOS, x86 Linux), publish them as a per-commit
+# GitHub release with sha256 checksums. Mirrors the BasisResearch/verus
+# fork's build.yml/rolling-release.yml pattern, except artifacts land on a
+# release so verus-tools-mcp can download them unauthenticated and verify
+# against hardcoded hashes.
+
+name: basis-build
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: basis-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        build: [macos, linux]
+        include:
+          - build: macos
+            os: macos-14
+            release_name: z3-arm64-macos
+          - build: linux
+            os: ubuntu-24.04
+            release_name: z3-x86-linux
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: install ninja
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Linux" ]; then
+            sudo apt-get update && sudo apt-get install -y ninja-build
+          else
+            brew install ninja
+          fi
+
+      - name: configure
+        run: >
+          cmake -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DZ3_BUILD_LIBZ3_SHARED=OFF
+          -DZ3_BUILD_TEST_EXECUTABLES=OFF
+          -DZ3_BUILD_PYTHON_BINDINGS=OFF
+          -DZ3_BUILD_DOTNET_BINDINGS=OFF
+          -DZ3_BUILD_JAVA_BINDINGS=OFF
+          -DZ3_BUILD_DOCUMENTATION=OFF
+          -DZ3_ENABLE_EXAMPLE_TARGETS=OFF
+
+      - name: build
+        run: cmake --build build --target shell
+
+      - name: package
+        shell: bash
+        run: |
+          strip build/z3 || true
+          ./build/z3 --version
+          cp build/z3 "${{ matrix.release_name }}"
+          shasum -a 256 "${{ matrix.release_name }}" > "${{ matrix.release_name }}.sha256"
+          cat "${{ matrix.release_name }}.sha256"
+
+      - name: upload release artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ matrix.release_name }}
+          path: |
+            ${{ matrix.release_name }}
+            ${{ matrix.release_name }}.sha256
+          if-no-files-found: error
+
+  publish:
+    if: github.event_name != 'pull_request'
+    needs: [build]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: download all artifacts
+        uses: actions/download-artifact@v8
+
+      - name: publish per-commit release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          tag="basis-${GITHUB_SHA:0:10}"
+          cat */*.sha256 > SHA256SUMS
+          gh release delete -y "$tag" --repo "$GITHUB_REPOSITORY" --cleanup-tag 2>/dev/null || true
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Basis z3 build $tag" \
+            --notes "$(printf 'Pinned Basis build of z3 at %s.\n\n```\n%s\n```' "$GITHUB_SHA" "$(cat SHA256SUMS)")" \
+            z3-arm64-macos/z3-arm64-macos \
+            z3-arm64-macos/z3-arm64-macos.sha256 \
+            z3-x86-linux/z3-x86-linux \
+            z3-x86-linux/z3-x86-linux.sha256 \
+            SHA256SUMS
