@@ -20,9 +20,11 @@ permissions:
   contents: read
 
 concurrency:
-  group: basis-build-${{ github.ref }}
-  # Cancel superseded PR builds only: a cancelled mainline run would leave
-  # that commit without a release.
+  # PR builds share a group per branch so a new push cancels the superseded
+  # run. Every other run gets a group per commit: a group holds only one
+  # pending run, so a shared mainline group would still drop the middle one
+  # of three quick pushes and leave that commit without a release.
+  group: basis-build-${{ github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -105,20 +107,37 @@ jobs:
         shell: bash
         run: |
           tag="basis-${GITHUB_SHA:0:10}"
+          files=(
+            z3-arm64-macos/z3-arm64-macos
+            z3-arm64-macos/z3-arm64-macos.sha256
+            z3-x86-linux/z3-x86-linux
+            z3-x86-linux/z3-x86-linux.sha256
+            SHA256SUMS
+          )
           # The binaries are not byte-reproducible, so a re-run must not
-          # replace a release whose hash verus-tools-mcp may already pin.
-          # An intentional replacement needs a manual `gh release delete`.
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $tag already exists; keeping it"
-            exit 0
+          # replace a published release whose hash verus-tools-mcp may
+          # already pin. An intentional replacement needs a manual
+          # `gh release delete`. `gh release create` uploads assets to a
+          # draft and publishes it last, so a draft here means an earlier
+          # run was interrupted; nobody can have pinned it, so redo it.
+          if release=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft,assets 2>/dev/null); then
+            if [ "$(jq -r .isDraft <<<"$release")" = true ]; then
+              echo "::warning::deleting draft release $tag left by an interrupted run"
+              gh release delete -y "$tag" --repo "$GITHUB_REPOSITORY"
+            else
+              missing=$(jq -r --args '$ARGS.positional - [.assets[].name] | join(" ")' \
+                "${files[@]##*/}" <<<"$release")
+              if [ -n "$missing" ]; then
+                echo "::error::published release $tag is missing assets: $missing; delete it by hand to rebuild"
+                exit 1
+              fi
+              echo "::notice::release $tag already exists with all assets; keeping it"
+              exit 0
+            fi
           fi
           cat */*.sha256 > SHA256SUMS
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" \
             --title "Basis z3 build $tag" \
             --notes "$(printf 'Pinned Basis build of z3 at %s.\n\n```\n%s\n```' "$GITHUB_SHA" "$(cat SHA256SUMS)")" \
-            z3-arm64-macos/z3-arm64-macos \
-            z3-arm64-macos/z3-arm64-macos.sha256 \
-            z3-x86-linux/z3-x86-linux \
-            z3-x86-linux/z3-x86-linux.sha256 \
-            SHA256SUMS
+            "${files[@]}"
